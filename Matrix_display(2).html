@@ -1,0 +1,782 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Matrix display</title>
+<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}canvas{display:block;width:100%;height:100%;background:#000}
+#nd{position:fixed;inset:0;display:none;flex-direction:column;align-items:center;justify-content:center;gap:12px;padding:24px;text-align:center;background:#000;color:#3cff78;font:600 18px ui-monospace,Menlo,Consolas,monospace;letter-spacing:.2em;text-shadow:0 0 10px rgba(60,255,120,.7)}
+#nd small{font-size:12px;letter-spacing:.12em;opacity:.6;text-shadow:none}
+html,body,canvas{cursor:none}
+#inp{position:fixed;left:0;top:0;width:1px;height:1px;margin:0;padding:0;border:0;opacity:0;font-size:16px;color:transparent;background:transparent;caret-color:transparent;outline:none}</style>
+</head><body><canvas id="c"></canvas><canvas id="gl"></canvas>
+<div id="nd">DESKTOP ONLY<small>open this on a computer</small></div>
+<input id="inp" maxlength="60" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="terminal input">
+<script>
+// 5x7 font, ASCII 32..90, one byte per column, LSB = top row
+const FONT=("00 00 00 00 00|00 00 5F 00 00|00 07 00 07 00|14 7F 14 7F 14|24 2A 7F 2A 12|23 13 08 64 62|36 49 55 22 50|00 05 03 00 00|00 1C 22 41 00|00 41 22 1C 00|08 2A 1C 2A 08|08 08 3E 08 08|00 50 30 00 00|08 08 08 08 08|00 60 60 00 00|20 10 08 04 02|"+
+"3E 51 49 45 3E|00 42 7F 40 00|42 61 51 49 46|21 41 45 4B 31|18 14 12 7F 10|27 45 45 45 39|3C 4A 49 49 30|01 71 09 05 03|36 49 49 49 36|06 49 49 29 1E|00 36 36 00 00|00 56 36 00 00|00 08 14 22 41|14 14 14 14 14|41 22 14 08 00|02 01 51 09 06|32 49 79 41 3E|"+
+"7E 11 11 11 7E|7F 49 49 49 36|3E 41 41 41 22|7F 41 41 22 1C|7F 49 49 49 41|7F 09 09 01 01|3E 41 41 51 32|7F 08 08 08 7F|00 41 7F 41 00|20 40 41 3F 01|7F 08 14 22 41|7F 40 40 40 40|7F 02 04 02 7F|7F 04 08 10 7F|3E 41 41 41 3E|7F 09 09 09 06|3E 41 51 21 5E|7F 09 19 29 46|46 49 49 49 31|01 01 7F 01 01|3F 40 40 40 3F|1F 20 40 20 1F|7F 20 18 20 7F|63 14 08 14 63|03 04 78 04 03|61 51 49 45 43")
+.split("|").map(g=>g.split(" ").map(h=>parseInt(h,16)));
+
+const BH=7,GAP=3,ROWS=3*BH+2*GAP;
+const EXTRA={"[":[0,127,65,65,0],"]":[0,65,65,127,0]}; // square brackets (the base font stops at Z)
+const glyph5=ch=>{if(EXTRA[ch])return EXTRA[ch];const k=ch.toUpperCase().charCodeAt(0)-32;return (k>=0&&k<FONT.length)?FONT[k]:FONT[0]};
+const POOL=["WAKE UP, NEO...","THE MATRIX HAS YOU","FOLLOW THE WHITE RABBIT","KNOCK, KNOCK, NEO.","THERE IS NO SPOON","SIGNAL ACQUIRED","SYSTEM ONLINE","LOOP 001 OF INFINITY","PHOSPHOR TEST 0123456789","ABCDEFGHIJKLMNOPQRSTUVWXYZ","!?:;+-=/<>@#%&()","RED ALERT","EVERY DOT ITS OWN LIGHT","FREE YOUR MIND"];
+const RB=[]; // mode 3: smooth per-dot scrolling bands
+for(let i=0;i<14;i++){const c=[];for(let j=0;j<4;j++){for(const ch of POOL[(i*5+j*3)%POOL.length])c.push(...glyph5(ch),0);for(let z=0;z<16;z++)c.push(0)}
+  RB.push({cols:c,off:Math.random()*c.length,dir:i%2?1:-1,speed:9+((i*7)%19)})}
+
+
+// ---------- segment glyphs ----------
+const UNLIT="rgba(150,175,200,.06)",DECAY=.09;
+const IDX={a:0,b:1,c:2,d:3,e:4,f:5,p:6,q:7,t:8,u:9,w:10,x:11,y:12,z:13},DP=1<<14,GF=1<<15;
+const m14=t=>{let m=0;for(const c of t)m|=1<<IDX[c];return m};
+const T14={A:"abcefpq",B:"abcdtuq",C:"adef",D:"abcdtu",E:"adefpq",F:"aefpq",G:"acdefq",H:"bcefpq",I:"adtu",J:"bcde",K:"efpxz",L:"def",M:"bcefwx",N:"bcefwz",O:"abcdef",P:"abefpq",Q:"abcdefz",R:"abefpqz",S:"acdfpq",T:"atu",U:"bcdef",V:"efxy",W:"bcefyz",X:"wxyz",Y:"wxu",Z:"adxy",
+"0":"abcdef","1":"bc","2":"abdepq","3":"abcdpq","4":"bcfpq","5":"acdfpq","6":"acdefpq","7":"abc","8":"abcdefpq","9":"abcdfpq",
+"-":"pq","_":"d","+":"pqtu","=":"dpq","/":"xy","*":"wxyzpqtu","?":"abqu","!":"tu",":":"tu","<":"xz",">":"wy","'":"t","#":"bcdpqtu","@":"abcdepq","%":"bfxy"};
+const G14={};for(const k in T14)G14[k]=m14(T14[k]);G14["."]=G14[","]=DP;
+const D7=[0x3F,0x06,0x5B,0x4F,0x66,0x6D,0x7D,0x07,0x7F,0x6F];
+const L7=[0x77,0x7C,0x39,0x5E,0x79,0x71,0x3D,0x76,0x30,0x1E,0x76,0x38,0x37,0x54,0x3F,0x73,0x67,0x50,0x6D,0x78,0x3E,0x1C,0x2A,0x76,0x6E,0x5B];
+const P7={"-":0x40,"_":0x08,"=":0x48,"?":0x53,"!":0x06,"'":0x20,'"':0x22,"/":0x52,":":0x40};
+function g7(ch){
+  if(ch=="."||ch==",")return DP;
+  const c=ch.charCodeAt(0);let v=0;
+  if(c>=48&&c<=57)v=D7[c-48];else if(c>=65&&c<=90)v=L7[c-65];else v=P7[ch]||0;
+  return (v&63)|((v&64)?GF:0);
+}
+const g14=ch=>G14[ch]||0;
+
+const SEG={
+ 1:{glyph:g7,act:[0,1,2,3,4,5,15,14],tk:.13,halo:false,base:"rgba(35,120,255,1)",core:"rgba(205,230,255,1)",
+  lines:[{p:["HELLO WORLD","SEGMENT TEST","ON AIR 12:34"],iv:.5,dir:1},{p:["7 SEG DISPLAY","ABCDEFGHIJLNOPRSTUY"],iv:.3,dir:-1},{p:["0123456789","3.14159265","0.123456789"],iv:.65,dir:1}]},
+ 2:{glyph:g14,act:[0,1,2,3,4,5,6,7,8,9,10,11,12,13,14],tk:.2,halo:true,base:"rgba(255,45,30,1)",core:"rgba(255,185,165,1)",
+  lines:[{p:["THE QUICK BROWN FOX","JUMPS OVER THE LAZY DOG"],iv:.5,dir:1},{p:["ABCDEFGHIJKLMNOPQRSTUVWXYZ","NOW WITH REAL LETTERS"],iv:.3,dir:-1},{p:["0123456789 +-=/*<>?!","BACKLIT RED 14 SEG"],iv:.65,dir:1}]}
+};
+for(const m in SEG){const S=SEG[m];S.lines.forEach(l=>{
+  const t=l.p.join("    ")+"    ";l.str=t;l.masks=[...t].map(S.glyph);l.pos=0;l.acc=0;});}
+
+function hexSeg(p1,p2,th){
+  const dx=p2[0]-p1[0],dy=p2[1]-p1[1],L=Math.hypot(dx,dy),ux=dx/L,uy=dy/L,nx=-uy*th/2,ny=ux*th/2,ax=ux*th/2,ay=uy*th/2,P=new Path2D();
+  P.moveTo(p1[0],p1[1]);P.lineTo(p1[0]+ax+nx,p1[1]+ay+ny);P.lineTo(p2[0]-ax+nx,p2[1]-ay+ny);P.lineTo(p2[0],p2[1]);
+  P.lineTo(p2[0]-ax-nx,p2[1]-ay-ny);P.lineTo(p1[0]+ax-nx,p1[1]+ay-ny);P.closePath();return P;
+}
+function buildSegs(w,h,tk){
+  const t=w*tk,e=.62*t,m=h/2,d=.7*t;
+  const D=[[e,t/2,w-e,t/2,t],[w-t/2,e,w-t/2,m-e,t],[w-t/2,m+e,w-t/2,h-e,t],[e,h-t/2,w-e,h-t/2,t],[t/2,m+e,t/2,h-e,t],[t/2,e,t/2,m-e,t],
+   [e,m,w/2-.9*t,m,t],[w/2+.9*t,m,w-e,m,t],[w/2,1.1*t,w/2,m-.9*t,t],[w/2,m+.9*t,w/2,h-1.1*t,t],
+   [1.2*t,1.3*t,w/2-.75*t,m-.95*t,d],[w-1.2*t,1.3*t,w/2+.75*t,m-.95*t,d],[1.2*t,h-1.3*t,w/2-.75*t,m+.95*t,d],[w-1.2*t,h-1.3*t,w/2+.75*t,m+.95*t,d]];
+  D[15]=[e,m,w-e,m,t];
+  const out=[],inn=[];
+  D.forEach((q,i)=>{out[i]=hexSeg([q[0],q[1]],[q[2],q[3]],q[4]);inn[i]=hexSeg([q[0],q[1]],[q[2],q[3]],q[4]*.38)});
+  const dp=new Path2D();dp.arc(w+t*.55,h-t*.5,t*.5,0,6.283);out[14]=dp;
+  const dpi=new Path2D();dpi.arc(w+t*.55,h-t*.5,t*.2,0,6.283);inn[14]=dpi;
+  return {out,inn,t};
+}
+
+// ---------- canvas / state ----------
+const cv=document.getElementById("c"),x=cv.getContext("2d");
+let W,H,pitch,cols,ov,s1,s2,s3,x0,y0;
+let tp,cs0,n0,nR,x00,y0t,I0,spr0,spr0r,sprPal,bg0,p3,cs3,cols3,rows3,nb3,xx3,yy3,I3,spr3,bg3;
+let mode=0,fade=0,sw,sh,sn,scw,sgeo,sI=[];
+const NMODES=4,ALLOW_SWITCH=false; // ALLOW_SWITCH: arrows/swipe mode switching is off for now
+const DESKTOP=!matchMedia("(hover:none) and (pointer:coarse)").matches; // touch-first devices get a notice instead
+const LH=10,FIELD_W=.88,FIELD_H=.84,FIELD_COLS=40,FIELD_ROWS=16; // text field: small dots, lots of room
+const spd=()=>1;
+
+function mk(w,h){const c=document.createElement("canvas");c.width=Math.max(1,w|0);c.height=Math.max(1,h|0);return c}
+function sprite(size,stops){
+  const c=mk(size,size),g=c.getContext("2d"),r=size/2,gr=g.createRadialGradient(r,r,0,r,r,r);
+  stops.forEach(s=>gr.addColorStop(s[0],s[1]));g.fillStyle=gr;g.fillRect(0,0,size,size);return c;
+}
+function resetSeg(){
+  sI=[0,1,2].map(()=>new Float32Array(sn*16));
+}
+function setup(){
+  const dpr=Math.min(window.devicePixelRatio||1,1.25);
+  W=cv.width=Math.floor(innerWidth*dpr);H=cv.height=Math.floor(innerHeight*dpr);
+  pitch=Math.max(4,Math.floor(Math.min(W/110,H/(ROWS+6))));
+  cols=Math.floor(W/pitch);
+  x0=(W-cols*pitch)/2;y0=(H-ROWS*pitch)/2;
+  let g;
+  const GRN=[[0,"rgba(235,255,240,1)"],[.4,"rgba(130,255,170,.95)"],[.75,"rgba(40,255,100,.35)"],[1,"rgba(20,255,80,0)"]];
+  const RED=[[0,"rgba(255,225,215,1)"],[.4,"rgba(255,110,85,.95)"],[.75,"rgba(255,40,30,.35)"],[1,"rgba(255,20,10,0)"]];
+  // mode 0: scripted text field. 5x7 dot characters, LH dot-rows per line (7 + gap).
+  // small dots: aim for ~FIELD_COLS characters across and ~FIELD_ROWS lines down, inside a margin.
+  tp=Math.max(3,Math.min(Math.floor(W*FIELD_W/(6*FIELD_COLS)),Math.floor(H*FIELD_H/(LH*FIELD_ROWS))));cs0=Math.round(tp*1.6);
+  n0=Math.floor(W*FIELD_W/(6*tp));x00=(W-n0*6*tp)/2;
+  nR=Math.floor(H*FIELD_H/(LH*tp));y0t=(H-nR*LH*tp)/2;
+  I0=new Float32Array(nR*n0*35);spr0=sprite(cs0,GRN);spr0r=sprite(cs0,RED);
+  sprPal=[0,28,52,120,165,195,230,265,295,330].map(h=>sprite(cs0,[[0,"hsla("+h+",100%,94%,1)"],[.4,"hsla("+h+",100%,70%,.95)"],[.75,"hsla("+h+",100%,55%,.35)"],[1,"hsla("+h+",100%,50%,0)"]]));
+  bg0=mk(W,H);g=bg0.getContext("2d");g.fillStyle=UNLIT;g.beginPath();
+  for(let li=0;li<nR;li++)for(let i=0;i<n0;i++)for(let c=0;c<5;c++)for(let r=0;r<7;r++){
+    const cx=x00+(i*6+c+.5)*tp,cy=y0t+(li*LH+r+.5)*tp;g.moveTo(cx+tp*.2,cy);g.arc(cx,cy,tp*.2,0,6.283)}
+  g.fill();
+  // mode 3: red full-screen dot grid, every dot is a light
+  p3=pitch;cs3=Math.round(p3*1.6);
+  cols3=Math.floor(W/p3);rows3=Math.floor(H*.97/p3);nb3=3;
+  xx3=(W-cols3*p3)/2;yy3=(H-rows3*p3)/2;
+  I3=new Float32Array(cols3*nb3*7);spr3=sprite(cs3,RED);
+  bg3=mk(W,H);g=bg3.getContext("2d");g.fillStyle=UNLIT;g.beginPath();
+  for(let r=0;r<rows3;r++)for(let c=0;c<cols3;c++){
+    const cx=xx3+(c+.5)*p3,cy=yy3+(r+.5)*p3;g.moveTo(cx+p3*.2,cy);g.arc(cx,cy,p3*.2,0,6.283)}
+  g.fill();
+  ov=mk(W,H);g=ov.getContext("2d");
+  g.fillStyle="rgba(0,0,0,.28)";const step=Math.max(3,Math.round(3*dpr));
+  for(let y=0;y<H;y+=step)g.fillRect(0,y,W,Math.max(1,dpr));
+  const v=g.createRadialGradient(W/2,H/2,Math.min(W,H)*.25,W/2,H/2,Math.hypot(W,H)*.55);
+  v.addColorStop(0,"rgba(0,0,0,0)");v.addColorStop(1,"rgba(0,0,0,.75)");
+  g.fillStyle=v;g.fillRect(0,0,W,H);
+  s1=mk(W/6,H/6);s2=mk(W/20,H/20);s3=mk(W/56,H/56);
+  [s1,s2,s3].forEach(c=>{const q=c.getContext("2d");q.imageSmoothingEnabled=true;q.imageSmoothingQuality="high"});
+  // segment cells share the matrix's character size: 7 dots tall, 6 dots per character
+  scw=6*pitch;sw=4.4*pitch;sh=7*pitch;sn=Math.floor(cols/6);
+  sgeo={1:buildSegs(sw,sh,SEG[1].tk),2:buildSegs(sw,sh,SEG[2].tk)};resetSeg();
+}
+setup();addEventListener("resize",setup);
+
+function go(d){mode=(mode+d+NMODES)%NMODES;fade=0;resetSeg();I0.fill(0);I3.fill(0)}
+addEventListener("keydown",e=>{
+  if(e.key==="Enter"&&!ptr.everLocked)lockPointer(); // first Enter (answering a question) captures the mouse, so it is ready for the glyph scene
+  if(e.code==="Backquote"||e.key==="`"){e.preventDefault();if(!e.repeat)togglePause();return}
+  if(paused){menuKey(e);return}
+  if(mode==0&&term.input.on&&document.activeElement!==inp)inp.focus();
+  if(!ALLOW_SWITCH)return;
+  const k=e.key;
+  if(k=="ArrowRight"){go(1);e.preventDefault()}else if(k=="ArrowLeft"){go(-1);e.preventDefault()}
+});
+let tx=null;
+addEventListener("touchstart",e=>{tx=e.touches[0].clientX},{passive:true});
+addEventListener("touchend",e=>{if(tx==null||!ALLOW_SWITCH)return;const dx=e.changedTouches[0].clientX-tx;tx=null;if(Math.abs(dx)>40)go(dx<0?1:-1)},{passive:true});
+
+// ---------- renderers ----------
+function clearTo(img){
+  x.globalCompositeOperation="source-over";x.globalAlpha=1;
+  x.fillStyle="#000";x.fillRect(0,0,W,H);x.drawImage(img,0,0);
+  x.globalCompositeOperation="lighter";
+}
+function drawM0(dt,rd){
+  const k=Math.exp(-rd/DECAY);clearTo(bg0);
+  const now=performance.now(),sw=term.sweep,a=I0,spr=(term.theme==="red"&&view.mode!=="credits")?spr0r:spr0;
+  const game=view.mode==="game";
+  cur.vis=cur.on||!game;                       // the pause menu always shows the cursor
+  // sweep: a band of glitch characters moves through the rows. forward = bottom -> top (clears). reverse = top -> bottom (restores).
+  const front=sw?Math.min(1,Math.max(0,(now-sw.t0)/sw.dur))*(nR+GLITCH_BAND):0;
+  if(sw&&now-sw.t0>=sw.dur)sw.done=true;
+  const blinkOn=((now-term.t0)%1000)<500;
+  curUpdate(now);
+  let rows,over=new Map(),ovc=new Map();
+  if(game){
+    rows=sw?sw.rows:termRows();
+    // overlays: the flickering colour glyphs, then the symbol flood on top (the cursor is drawn above both)
+    term.glyphs=term.glyphs.filter(g=>!(g.clicked&&now-g.clickT>260));
+    for(const g of term.glyphs){
+      g.hover=cur.vis&&!g.clicked&&cur.li===g.row&&Math.abs(cur.i-g.col)<=1;
+      const key=g.row*n0+g.col;over.set(key,glyphFlicker(g,now));ovc.set(key,glyphColor(g,now));
+    }
+    if(term.flood)for(const [key,v] of term.flood){let q=v;if(Math.random()<.05){q=glitchGlyph();term.flood.set(key,q)}over.set(key,q);ovc.delete(key)}
+  }else{const m=menuBuild();rows=m.rows;over=m.over;ovc=m.ovc}
+  const off=game?Math.max(0,rows.length-nR):0;
+  for(let li=0;li<nR;li++){
+    let cleared=false,band=false;
+    if(sw){
+      if(sw.reverse){cleared=li>=front;band=!cleared&&li>=front-GLITCH_BAND}
+      else{const ib=nR-1-li;cleared=ib<front-GLITCH_BAND;band=!cleared&&ib<front}
+    }
+    const row=rows[li+off]||"";
+    for(let i=0;i<n0;i++){
+      const key=li*n0+i,ch=row[i]||" ";
+      let gl,kr=k,dim=1,sp=spr;
+      if(cleared){gl=BLANK;kr=0}
+      else if(band){gl=(ch!==" "||Math.random()<.22)?glitchGlyph():BLANK;kr=0}
+      else{
+        gl=ch===CUR?(blinkOn?BLOCK:BLANK):glyph5(ch);
+        const o=over.get(key);if(o){gl=o;const ci=ovc.get(key);if(ci!==undefined)sp=sprPal[ci]}
+      }
+      if(cur.vis&&((li===cur.li&&i===cur.i)||(li===cur.pli&&i===cur.pi))){
+        kr=0;if(li===cur.li&&i===cur.i&&cur.glyph){gl=cur.glyph;sp=spr;if(cur.state===2)dim=.7}
+      }
+      for(let c=0;c<5;c++){const v=gl[c];
+        for(let r=0;r<7;r++){
+          const j=(key*5+c)*7+r;
+          a[j]=((v>>r)&1)?.88+.12*Math.random():a[j]*kr;
+          if(a[j]<.03)continue;
+          x.globalAlpha=a[j]*.8*dim;x.drawImage(sp,x00+(i*6+c+.5)*tp-cs0/2,y0t+(li*LH+r+.5)*tp-cs0/2);
+        }}
+    }
+  }
+}
+function drawM3(dt,rd,pz){
+  const k=Math.exp(-rd/DECAY);clearTo(bg3);
+  const r0=(rows3-ROWS)>>1;
+  for(let b=0;b<nb3;b++){
+    const B=RB[b];
+    if(!pz){
+      B.off+=B.dir*B.speed*dt;const len=B.cols.length,st=Math.floor(B.off);
+      for(let c=0;c<cols3;c++){const v=B.cols[(((st+c)%len)+len)%len];
+        for(let r=0;r<7;r++){const j=(b*7+r)*cols3+c;I3[j]=((v>>r)&1)?.88+.12*Math.random():I3[j]*k}}
+    }
+    for(let r=0;r<7;r++){const cy=yy3+(r0+b*(BH+GAP)+r+.5)*p3;
+      for(let c=0;c<cols3;c++){const v=I3[(b*7+r)*cols3+c];if(v<.03)continue;
+        x.globalAlpha=v*.8;x.drawImage(spr3,xx3+(c+.5)*p3-cs3/2,cy-cs3/2)}}
+  }
+}
+function drawSeg(dt,rd,pz){
+  const S=SEG[mode],G=sgeo[mode],k=Math.exp(-rd/DECAY),len=n=>n.masks.length;
+  x.globalCompositeOperation="source-over";x.globalAlpha=1;
+  x.fillStyle="#000";x.fillRect(0,0,W,H);
+  const ox0=(W-sn*scw)/2,rowY=S.lines.map((l,li)=>y0+li*(BH+GAP)*pitch);
+  // step the text one whole cell at a time
+  S.lines.forEach((l,li)=>{
+    l.acc+=dt;while(l.acc>=l.iv){l.acc-=l.iv;l.pos=(l.pos+l.dir+len(l))%len(l)}
+    const arr=sI[li];
+    for(let i=0;i<sn;i++){
+      const m=l.masks[(l.pos+i)%len(l)];
+      for(let s=0;s<16;s++)arr[i*16+s]=((m>>s)&1)?.88+.12*Math.random():arr[i*16+s]*k;
+    }
+  });
+  const skew=-.07,pass=(lit)=>{
+    S.lines.forEach((l,li)=>{
+      const arr=sI[li];
+      for(let i=0;i<sn;i++){
+        x.setTransform(1,0,skew,1,ox0+i*scw+(scw-sw)/2+.035*sh,rowY[li]);
+        for(const s of S.act){
+          const v=arr[i*16+s];
+          if(lit){if(v<.04)continue;
+            if(S.halo){x.globalAlpha=v*.2;x.strokeStyle=S.base;x.lineWidth=G.t*1.7;x.lineJoin="round";x.stroke(G.out[s])}
+            x.globalAlpha=v;x.fillStyle=S.base;x.fill(G.out[s]);
+            x.globalAlpha=v*.9;x.fillStyle=S.core;x.fill(G.inn[s]);
+          }else if(v<.04){x.globalAlpha=1;x.fillStyle=UNLIT;x.fill(G.out[s])}
+        }
+      }
+    });
+    x.setTransform(1,0,0,1,0,0);
+  };
+  pass(false);x.globalCompositeOperation="lighter";pass(true);
+}
+
+// ---------- green matrix: scripted sequence ----------
+const CUR="\u2588",BLOCK=[127,127,127,127,127],HOLLOW=[127,65,65,65,127],BLANK=[0,0,0,0,0];
+const SCRIPT_A=["KNOCK, KNOCK, KNOCK, NEO.","WAKE UP NEO...","THE MATRIX HAS YOU ASLEEP.","FOLLOW THE WHITE RABBIT.",".."];
+const SCRIPT_B=["SYSTEM ONLINE","SIGNAL ACQUIRED.","THERE IS NO SPOON."];
+const SCRIPT_Q2=["WHERE IS THE MATCH IN THE BOX?"];
+const SCRIPT_C=["GREETINGS, USER!","USING ADMIN"];
+const SCRIPT_U=["UNKNOWN ACCESS"];
+const SCRIPT_T=["TRACING...","FOUND..","CLOSING."];
+const inp=document.getElementById("inp");
+const term={paras:[],input:{on:false,text:""},submit:null,t0:0,sweep:null,glyphs:[],flood:null,typing:null,theme:"green"};
+// pause state: while paused the script stops advancing (every sleep holds until resume) and game time stops
+let paused=false,pausedAt=0,pausedTotal=0;
+const tnow=()=>performance.now()-pausedTotal-(paused?performance.now()-pausedAt:0);
+const rsleep=ms=>new Promise(r=>setTimeout(r,ms));
+const sleep=async ms=>{await rsleep(ms);while(paused)await rsleep(40)};
+const waitFor=cond=>new Promise(res=>{const t=setInterval(()=>{if(cond()){clearInterval(t);res()}},40)});
+const norm=s=>s.trim().replace(/\s+/g," ").replace(/[.!?]+$/,"").toUpperCase();
+
+// glitch characters: random glyphs, inverted / mirrored / upside-down ones, and a few block patterns
+const GLITCH_BAND=5,SWEEP_MS=420,FLOOD_MS=4200;
+const GLITCH_BLOCKS=[[127,127,127,127,127],[85,85,85,85,85],[127,0,127,0,127],[85,42,85,42,85],[0,127,0,127,0],[8,28,62,28,8]];
+function glitchGlyph(){
+  const g=FONT[1+((Math.random()*58)|0)].slice(),q=Math.random();
+  if(q<.5)return g;
+  if(q<.62)return g.map(v=>~v&127);
+  if(q<.74)return g.reverse();
+  if(q<.86)return g.map(v=>{let r=0;for(let b=0;b<7;b++)if((v>>b)&1)r|=1<<(6-b);return r});
+  return GLITCH_BLOCKS[(Math.random()*GLITCH_BLOCKS.length)|0];
+}
+// one sweep, either way: rows = the text that stays up while the band passes
+async function runSweep(rows,reverse){
+  term.sweep={t0:performance.now(),dur:SWEEP_MS,rows,reverse:!!reverse};
+  await rsleep(SWEEP_MS+40);
+  const t=performance.now(),sw=term.sweep;
+  while(!sw.done&&performance.now()-t<2500)await rsleep(30); // slow device: wait for the last frame
+  term.sweep=null;
+}
+// stark clear: the old text stays up while a band of glitch characters sweeps it away, bottom to top
+async function clearScreen(){
+  const rows=termRows();
+  term.paras=[];term.input={on:false,text:""};term.typing=null;
+  await runSweep(rows,false);
+  term.glyphs=[];term.flood=null;I0.fill(0);                         // stark: nothing is left to fade
+}
+
+// word-wrap one paragraph into rows of at most w characters; continuation rows can be indented (no scrolling, just line breaks)
+function wrap(s,w,ind=0){
+  const rows=[];let i=0,first=true;
+  for(;;){
+    const lim=first?w:Math.max(1,w-ind),pre=first?"":" ".repeat(ind);
+    if(s.length-i<=lim){rows.push(pre+s.slice(i));break}
+    const j=i+lim,k=s.lastIndexOf(" ",j);
+    if(k>i){rows.push(pre+s.slice(i,k));i=k+1}else{rows.push(pre+s.slice(i,j));i=j}
+    first=false;
+  }
+  return rows;
+}
+const CHATLINE=/^[A-Z]: /;
+function termRows(){
+  const w=Math.max(1,n0),rows=[];
+  for(const p of term.paras)rows.push(...wrap(p,w,CHATLINE.test(p)?3:0));
+  if(term.typing)rows.push(term.typing+": TYPING"+".".repeat(1+(((performance.now()/350)|0)%3)));
+  if(term.input.on)rows.push(...wrap(term.input.text+CUR,w));
+  return rows;
+}
+async function typeLines(lines,pause=850){
+  for(const line of lines){
+    term.paras.push("");const n=term.paras.length-1;
+    for(const ch of line){
+      term.paras[n]+=ch;
+      await sleep(ch=="."?320:ch==","?240:ch==" "?90:55+Math.random()*55);
+    }
+    await sleep(pause);
+  }
+}
+// organic typing: uneven rhythm, longer beats on punctuation, the odd hesitation, the odd fast streak
+async function typeInto(n,text,base){
+  const mood=.85+Math.random()*.4;                       // each message is typed a bit faster or slower than the last
+  for(let j=0;j<text.length;j++){
+    const ch=text[j];term.paras[n]+=ch;
+    let d=base*mood*(.6+Math.random()*.9);
+    if(Math.random()<.12)d*=.5;                          // quick burst
+    if(ch===" ")d+=25+Math.random()*80;
+    else if(",;".includes(ch))d+=180+Math.random()*220;
+    else if(".!?".includes(ch))d+=text[j+1]===ch?40:260+Math.random()*320;
+    if(ch===" "&&Math.random()<.08)d+=300+Math.random()*600; // stops to think between words
+    else if(Math.random()<.05)d+=120+Math.random()*260;      // small stumble mid-word
+    await sleep(d);
+  }
+}
+function promptInput(answer){
+  return new Promise(res=>{
+    inp.value="";term.input={on:true,text:""};term.t0=performance.now();inp.focus();
+    term.submit=()=>{
+      const t=term.input.text;
+      term.input={on:false,text:""};term.submit=null;inp.value="";
+      if(t)term.paras.push(t); // keep what they typed on screen for a beat
+      res(norm(t)===norm(answer));
+    };
+  });
+}
+inp.addEventListener("input",()=>{
+  if(paused){inp.value=term.input.on?term.input.text:"";return}
+  const v=inp.value.toUpperCase().replace(/[^\x20-\x5A\x5B\x5D]/g,"");
+  if(v!==inp.value)inp.value=v;
+  if(term.input.on){term.input.text=v;term.t0=performance.now()}
+});
+inp.addEventListener("keydown",e=>{
+  if(paused)return;
+  if(e.key=="Enter"){e.preventDefault();if(!e.repeat&&term.input.on&&term.submit)term.submit()}
+  else if(/^(Arrow|Home|End)/.test(e.key))e.preventDefault();
+});
+addEventListener("mousedown",e=>{if(term.input.on)e.preventDefault()});
+addEventListener("click",()=>{if(term.input.on)inp.focus()});
+
+// ---------- the on-screen cursor ----------
+// follows the pointer, snapped to the character grid. states: 1 solid block, 2 outline, 0 invisible.
+// it never blinks like a text cursor: it flickers fast all the time, and faster still while moving or just after a click.
+const ptr={x:innerWidth/2,y:innerHeight/2,ax:-99,ay:-99,moveT:0,has:false,locked:false,everLocked:false}; // starts at the centre
+const cur={on:false,vis:false,li:-1,i:-1,pli:-1,pi:-1,glyph:null,state:1,flickUntil:0,nextFlick:0,cellChanged:false};
+function cellAtPointer(){
+  const mx=ptr.x,my=ptr.y;
+  let px=2*mx/innerWidth-1,py=2*my/innerHeight-1;
+  if(GL){const f=(1+BULGE*(px*px+py*py))/(1+BULGE);px*=f;py*=f} // the fisheye moves things, so aim at where the pixel really is
+  const cx=(px+1)/2*W,cy=(py+1)/2*H;
+  return [Math.max(0,Math.min(nR-1,Math.floor((cy-y0t)/(LH*tp)))),Math.max(0,Math.min(n0-1,Math.floor((cx-x00)/(6*tp))))];
+}
+function curUpdate(now){
+  cur.cellChanged=false;
+  if(!cur.vis){cur.glyph=null;return}
+  const [li,i]=cellAtPointer();
+  if(li!==cur.li||i!==cur.i){cur.pli=cur.li;cur.pi=cur.i;cur.li=li;cur.i=i;cur.cellChanged=true}
+  const fast=now-ptr.moveT<160||now<cur.flickUntil;
+  if(now>=cur.nextFlick){
+    cur.nextFlick=now+(fast?18+Math.random()*40:34+Math.random()*46);
+    const q=Math.random();
+    cur.state=fast?(q<.33?1:q<.66?2:0):(q<.42?1:q<.85?2:0);
+  }
+  cur.glyph=cur.state===1?BLOCK:cur.state===2?HOLLOW:null;
+}
+// pointer capture: the mouse is locked to the page on the first gesture (Enter on an answer, or a click) and driven by relative movement.
+// Esc releases it (browser rule); a click captures it again. If the browser refuses (sandboxed frame), the cursor just follows the pointer normally.
+function lockPointer(){
+  if(!DESKTOP||ptr.locked)return;
+  const el=GL?glc:cv;
+  try{const r=el.requestPointerLock&&el.requestPointerLock();if(r&&r.catch)r.catch(()=>{})}catch(e){}
+}
+document.addEventListener("pointerlockchange",()=>{
+  const was=ptr.locked;
+  ptr.locked=document.pointerLockElement===(GL?glc:cv);
+  if(ptr.locked)ptr.everLocked=true;
+  else if(was&&!paused&&view.mode==="game")togglePause(); // Esc gave the mouse back: that opens the pause menu
+});
+document.addEventListener("pointerlockerror",()=>{});
+addEventListener("pointermove",e=>{
+  const now=performance.now();
+  if(ptr.locked||ptr.everLocked){ // by movement (locked, or the lock was released with Esc: no jump to where the OS pointer is)
+    ptr.x=Math.max(0,Math.min(innerWidth-1,ptr.x+e.movementX));ptr.y=Math.max(0,Math.min(innerHeight-1,ptr.y+e.movementY));
+    ptr.has=true;if(Math.hypot(e.movementX,e.movementY)>.5)ptr.moveT=now;
+  }else{                          // no lock (yet, or the browser refuses it): follow the pointer position directly
+    ptr.x=e.clientX;ptr.y=e.clientY;ptr.has=true;
+    if(Math.hypot(e.clientX-ptr.ax,e.clientY-ptr.ay)>2){ptr.ax=e.clientX;ptr.ay=e.clientY;ptr.moveT=now}
+  }
+});
+addEventListener("pointerdown",e=>{
+  if(!ptr.locked&&!ptr.everLocked){ptr.x=e.clientX;ptr.y=e.clientY}
+  ptr.has=true;lockPointer();
+  const now=performance.now();
+  if(paused||view.mode!=="game"){cur.flickUntil=now+380;if(view.mode!=="game"&&!view.busy)menuClick();return}
+  if(!cur.on)return;
+  const [li,i]=cellAtPointer();
+  cur.flickUntil=now+380;
+  for(const g of term.glyphs)if(!g.clicked&&li===g.row&&Math.abs(i-g.col)<=1){g.clicked=true;g.clickT=now}
+});
+
+// ---------- flickering glyphs (clickable), and the symbol flood ----------
+function glyphColor(g,now){ // random colour, re-rolled at random moments
+  if(now>=g.cnext){g.ci=(Math.random()*sprPal.length)|0;g.cnext=now+30+Math.random()*110}
+  return g.ci;
+}
+function glyphFlicker(g,now){
+  if(now>=g.next){g.cur=glitchGlyph();g.next=now+((g.hover||g.clicked)?25+Math.random()*35:45+Math.random()*100)}
+  return Math.random()<.06?BLANK:g.cur;
+}
+function spawnGlyph(avoid){
+  const r0=Math.min(7,Math.max(0,nR-4));
+  for(let t=0;t<60;t++){
+    const row=r0+((Math.random()*(nR-r0-1))|0),col=1+((Math.random()*(n0-2))|0);
+    if(avoid.some(g=>g.row===row&&Math.abs(g.col-col)<4))continue;
+    if(Math.abs(cur.li-row)<2&&Math.abs(cur.i-col)<6)continue;
+    return {row,col,cur:glitchGlyph(),next:0,ci:0,cnext:0,hover:false,clicked:false,clickT:0};
+  }
+  return {row:r0,col:1,cur:glitchGlyph(),next:0,ci:0,cnext:0,hover:false,clicked:false,clickT:0};
+}
+async function floodScreen(){
+  const total=n0*nR,order=[...Array(total).keys()];
+  for(let q=total-1;q>0;q--){const r=(Math.random()*(q+1))|0;[order[q],order[r]]=[order[r],order[q]]}
+  term.flood=new Map();
+  const t0=tnow();let n=0;
+  for(;;){
+    const f=Math.min(1,(tnow()-t0)/FLOOD_MS);
+    const target=f>=1?total:Math.floor(total*Math.pow(f,2.2)); // starts slow, ends fast
+    while(n<target){term.flood.set(order[n],glitchGlyph());n++}
+    if(f>=1)break;
+    await sleep(33);
+  }
+}
+async function cursorPhase(){
+  cur.on=true;cur.flickUntil=performance.now()+500;
+  await sleep(1400);
+  const a=spawnGlyph([]);term.glyphs.push(a);
+  await waitFor(()=>a.clicked);
+  await sleep(500);
+  await typeLines(SCRIPT_U,700);
+  await sleep(300);
+  const b=spawnGlyph(term.glyphs);term.glyphs.push(b);
+  const c=spawnGlyph(term.glyphs);term.glyphs.push(c);
+  await waitFor(()=>b.clicked&&c.clicked);
+  await sleep(700);
+  cur.on=false;                       // scene over: no cursor again until the pause menu (the OS cursor is always hidden)
+  await typeLines(SCRIPT_T,600);
+  await sleep(500);
+  await floodScreen();
+  await sleep(600);
+  await clearScreen();
+  term.theme="red";
+}
+
+// ---------- the chatroom (red) ----------
+let lastWho="",lastLen=0;
+async function say(who,text,compose){
+  // read the last message first (quicker if it's the same person still going)
+  await sleep(who===lastWho?200+Math.random()*450:350+lastLen*10+Math.random()*700);
+  term.typing=who;                                    // "X: TYPING..." while they compose
+  const t=compose?compose*(.9+Math.random()*.3):Math.min(3000,Math.max(900,600+text.length*14))*(.85+Math.random()*.6);
+  if(!compose&&text.length>25&&Math.random()<.4){     // starts typing, stops, starts again
+    await sleep(t*.4);term.typing=null;await sleep(500+Math.random()*900);term.typing=who;await sleep(t*.6);
+  }else await sleep(t);
+  term.typing=null;
+  term.paras.push(who+": ");                          // then the message is typed out, character by character
+  await typeInto(term.paras.length-1,text,56);
+  lastWho=who;lastLen=text.length;
+  await sleep(650+Math.random()*750);
+}
+async function sys(text){term.paras.push("");await typeInto(term.paras.length-1,text,34);lastWho="";lastLen=12}
+const CHAT=[
+ ["say","P","Hey, Hows the server going?"],
+ ["say","R","good. been kinda buggy. i came in running off break because some random thing had broken in. i patched it out. i dont think it will open again.",2000],
+ ["say","P","Nice."],
+ ["say","P","Any trace of origin?"],
+ ["say","R","No, nothing. it returned nil."],
+ ["wait",3800],
+ ["say","P","You know. Youre the only person who really likes me.",2200],
+ ["say","R","really?"],
+ ["say","P","Yeah. Most just see me as the cold guy. but you?"],
+ ["say","P","You actually treated me..."],
+ ["say","P","Normal"],
+ ["hesitate","R",1000],["wait",700],
+ ["say","R","sorry that happens to you. there is so much more to you than just the cold guy..",1800],
+ ["say","P","Thanks. its not your fault tho"],
+ ["type","R"],["wait",1100],
+ ["sys","[[F JOINED CHATROOM]]"],
+ ["wait",1000],["stop"],["wait",700],
+ ["say","P","Greetings, F."],
+ ["say","F","Hey hon."],
+ ["say","F","You ever turning in that report?"],
+ ["say","P","Yes.",3000],
+ ["say","F","Ok."],
+ ["say","F","What were you lot talking about?"],
+ ["wait",1800],
+ ["say","R","nothing."],
+ ["say","F","sure. P, turn it in, we need to mail out. by next friday."],
+ ["sys","[[F LEFT CHATROOM]]"],
+ ["wait",1500],
+ ["hesitate","R",1000],["wait",600],["hesitate","R",1000],["wait",200],
+ ["say","R","why did F call you that?",600],
+ ["say","P","No reason."],
+ ["say","P","I dislike that he still does that."],
+ ["say","P","It fell apart long ago"],
+ ["wait",3000],
+ ["say","R","Hey, P?"],
+ ["say","P","Yes?"],
+ ["say","R","youre a good person inside."],
+ ["say","R","dont let it get to your heart. for me."],
+ ["sys","[[R LEFT THE CHATROOM]]"]
+];
+async function runChat(){
+  await sleep(500);
+  await typeLines(["[[CHATROOM OPEN]]","[[VIEWING MODE, GET PERMS TO JOIN]]"]);
+  await sleep(1100);
+  for(const [op,a,b,c] of CHAT){
+    if(op==="say")await say(a,b,c);
+    else if(op==="sys")await sys(a);
+    else if(op==="wait")await sleep(a*1.2*(.9+Math.random()*.35));
+    else if(op==="type")term.typing=a;
+    else if(op==="stop")term.typing=null;
+    else if(op==="hesitate"){term.typing=a;await sleep(b*1.2*(.9+Math.random()*.35));term.typing=null}
+  }
+  await sleep(1600);
+  await clearScreen();
+}
+
+// ---------- pause menu + gallery ----------
+// ` caches everything where it is (the game state is simply left untouched and the script holds), clears the screen and opens the menu.
+// RESUME clears the menu, then runs the clear in reverse and the screen comes back exactly as it was (the cursor is not part of it).
+const view={mode:"game",sel:0,busy:false,items:[],scrollT0:null,pendingPause:false};
+const CREDITS=["DEV TEAM:","wierdoretry","","","","","SPONSORS:","[pay support and join to get on this list!]"]; // the empty rows are room for more names
+const CREDITS_SPEED=1.5; // rows per second
+function creditsLines(){const w=Math.max(10,n0-4),L=[];for(const t of CREDITS)L.push(...wrap(t.toUpperCase(),w));return L}
+let GALLERY=null;
+// extra life on every pause page: now and then one line glitches or tears sideways (no scattered characters)
+const fx={next:0,row:-1,until:0,kind:0,shift:1};
+function pauseFx(grid,over,ovc,now,items){
+  const has=r=>grid[r].some(c=>c!==" ")||Array.from({length:n0},(_,c)=>c).some(c=>over.has(r*n0+c));
+  if(now>=fx.next){
+    const rows=[];for(let r=0;r<nR;r++)if(has(r))rows.push(r);
+    if(rows.length){fx.row=rows[(Math.random()*rows.length)|0];fx.kind=Math.random()<.5?0:1;fx.shift=(Math.random()<.5?-1:1)*(1+((Math.random()*3)|0));fx.until=now+110+Math.random()*130}
+    fx.next=now+1800+Math.random()*2800;
+  }
+  if(now<fx.until&&fx.row>=0){
+    const r=fx.row;
+    if(fx.kind===0){ // the line turns to glitch characters
+      for(let c=0;c<n0;c++){const k=r*n0+c;if(grid[r][c]!==" "||over.has(k)||Math.random()<.1){over.set(k,glitchGlyph());ovc.delete(k);grid[r][c]=" "}}
+    }else{           // the line slides sideways
+      const old=grid[r].slice();for(let c=0;c<n0;c++){const f=c-fx.shift;grid[r][c]=f>=0&&f<n0?old[f]:" "}
+      const moved=[];for(let c=0;c<n0;c++){const k=r*n0+c;if(over.has(k)){moved.push([c,over.get(k),ovc.get(k)]);over.delete(k);ovc.delete(k)}}
+      for(const [c,g,col] of moved){const nc=c+fx.shift;if(nc>=0&&nc<n0){over.set(r*n0+nc,g);if(col!==undefined)ovc.set(r*n0+nc,col)}}
+    }
+  }
+}
+function galleryList(){
+  if(GALLERY)return GALLERY;
+  GALLERY=[];
+  for(let k=1;k<FONT.length;k++)GALLERY.push({g:FONT[k],label:"CHARACTER "+String.fromCharCode(32+k)+"  CODE "+(32+k)});
+  for(const ch of "[]")GALLERY.push({g:EXTRA[ch],label:"CHARACTER "+ch+"  CODE "+ch.charCodeAt(0)});
+  GLITCH_BLOCKS.forEach((g,n)=>GALLERY.push({g,label:"GLITCH BLOCK "+(n+1)}));
+  GALLERY.push({g:HOLLOW,label:"CURSOR OUTLINE"});
+  return GALLERY;
+}
+function menuBuild(){
+  const grid=Array.from({length:nR},()=>Array(n0).fill(" "));
+  const over=new Map(),ovc=new Map(),items=[];
+  const put=(r,c,t)=>{for(let j=0;j<t.length;j++)if(r>=0&&r<nR&&c+j>=0&&c+j<n0)grid[r][c+j]=t[j]};
+  const ctr=t=>Math.max(0,Math.floor((n0-t.length)/2)),mid=Math.floor(nR/2);
+  const item=(label,r)=>{const c=ctr(label);put(r,c,label);items.push({label,row:r,col:c})};
+  // the pointer moving onto an item selects it (the arrow keys can still change the selection afterwards)
+  if(cur.cellChanged||performance.now()-ptr.moveT<250)view.items.forEach((it,k)=>{if(cur.li===it.row&&cur.i>=it.col-2&&cur.i<=it.col+it.label.length+1)view.sel=k});
+  if(view.mode==="menu"){
+    put(mid-4,ctr("PAUSED"),"PAUSED");
+    item("RESUME",mid-2);item("GALLERY",mid);item("CREDITS",mid+2);
+  }else if(view.mode==="credits"){
+    // the credits roll: lines enter at the bottom of the window above BACK, move up row by row, and leave at the top
+    const lines=creditsLines(),H=Math.max(3,nR-3);
+    const off=view.scrollT0==null?0:Math.max(0,Math.floor((performance.now()-view.scrollT0)/1000*CREDITS_SPEED));
+    for(let r=0;r<H;r++){const t=lines[off+r-H];if(t)put(r,ctr(t),t)}
+    item("BACK",nR-2);
+    // all of it has rolled past: the credits end and the menu comes back
+    if(view.scrollT0!=null&&off>=lines.length+H+2&&!view.busy&&!term.sweep)goPage("menu");
+  }else{
+    const L=galleryList(),title="GALLERY";put(1,ctr(title),title);
+    const avail=Math.max(1,nR-9);
+    let px=2,py=2,per=Math.floor((n0-3)/px)+1;
+    if(Math.ceil(L.length/per)*py>avail){px=1;per=n0-2}
+    if(Math.ceil(L.length/per)*py>avail)py=1;
+    const rowsN=Math.ceil(L.length/per),wTot=(Math.min(per,L.length)-1)*px+1;
+    const c0=Math.max(0,Math.floor((n0-wTot)/2)),r0=3+Math.max(0,Math.floor((avail-rowsN*py)/2));
+    let hov=-1;
+    L.forEach((e,n)=>{
+      const r=r0+Math.floor(n/per)*py,c=c0+(n%per)*px;
+      if(cur.li===r&&cur.i===c)hov=n;
+      over.set(r*n0+c,e.g);
+    });
+    if(hov>=0){ // the hovered character is lit in colour, and named below
+      const r=r0+Math.floor(hov/per)*py,c=c0+(hov%per)*px;
+      ovc.set(r*n0+c,2);
+      put(nR-4,ctr(L[hov].label),L[hov].label);
+    }
+    item("BACK",nR-2);
+  }
+  const sel=Math.min(view.sel,items.length-1);
+  items.forEach((it,k)=>{ // the selected item gets > < markers and a colour
+    if(k!==sel)return;
+    put(it.row,it.col-2,">");put(it.row,it.col+it.label.length+1,"<");
+    for(let j=-2;j<=it.label.length+1;j++){const ch=j===-2?">":j===it.label.length+1?"<":it.label[j];if(ch&&ch!==" "){over.set(it.row*n0+it.col+j,glyph5(ch));if(view.mode!=="credits")ovc.set(it.row*n0+it.col+j,2)}}
+  });
+  if(!term.sweep)pauseFx(grid,over,ovc,performance.now(),items);
+  view.items=items;
+  return {rows:grid.map(r=>r.join("")),over,ovc};
+}
+function menuActivate(k){
+  const it=view.items[k];if(!it||view.busy)return;
+  if(it.label==="RESUME")resume();
+  else if(it.label==="GALLERY")goPage("gallery");
+  else if(it.label==="CREDITS")goPage("credits");
+  else if(it.label==="BACK")goPage("menu");
+}
+// page change: the current page clears with the glitch sweep, the new one comes back with the reverse sweep
+async function goPage(mode){
+  if(view.busy)return;
+  view.busy=true;
+  await runSweep(null,false);
+  view.mode=mode;view.sel=0;view.items=[];view.scrollT0=null;
+  await runSweep(null,true);
+  if(mode==="credits")view.scrollT0=performance.now(); // the roll starts once the page is fully back
+  view.busy=false;
+}
+function menuClick(){
+  const [li,i]=cellAtPointer();
+  view.items.forEach((it,k)=>{if(li===it.row&&i>=it.col-2&&i<=it.col+it.label.length+1)menuActivate(k)});
+}
+function menuKey(e){
+  if(view.busy)return;
+  const n=view.items.length||1;
+  if(e.key==="ArrowDown"){view.sel=(view.sel+1)%n;e.preventDefault()}
+  else if(e.key==="ArrowUp"){view.sel=(view.sel+n-1)%n;e.preventDefault()}
+  else if(e.key==="Enter"||e.key===" "){e.preventDefault();if(!e.repeat)menuActivate(view.sel)}
+}
+async function openPause(){
+  view.busy=true;paused=true;pausedAt=performance.now();
+  await runSweep(termRows(),false);        // everything clears
+  view.mode="menu";view.sel=0;view.items=[];
+  await runSweep(null,true);               // and the menu comes in with the reverse sweep
+  view.busy=false;
+}
+async function resume(){
+  view.busy=true;
+  await runSweep(null,false);              // the menu clears
+  view.mode="game";
+  await runSweep(termRows(),true);         // reverse clear: the screen comes back as it was
+  pausedTotal+=performance.now()-pausedAt;paused=false;view.busy=false;
+  inp.value=term.input.on?term.input.text:"";
+  if(term.input.on)inp.focus();
+}
+function togglePause(){
+  if(view.busy||term.sweep){ // mid-transition: wait for it to finish, then do it
+    if(!view.pendingPause){view.pendingPause=true;waitFor(()=>!view.busy&&!term.sweep).then(()=>{view.pendingPause=false;togglePause()})}
+    return;
+  }
+  if(!paused)openPause();
+  else if(view.mode!=="menu")goPage("menu");
+  else resume();
+}
+
+// a question: the answer must match, otherwise the screen clears and just this question replays
+async function ask(lines,answer){
+  for(;;){
+    await typeLines(lines);
+    await sleep(300);
+    const ok=await promptInput(answer);
+    await sleep(700);
+    await clearScreen();await sleep(500);
+    if(ok)return;
+  }
+}
+async function run(){
+  await sleep(900);
+  await typeLines(SCRIPT_A);
+  await sleep(1600);
+  await clearScreen();await sleep(500);     // screen clears
+  await ask(SCRIPT_B,"OR IS THERE");
+  await ask(SCRIPT_Q2,"BURNT AFLAME");
+  inp.blur();
+  await typeLines(SCRIPT_C);
+  await cursorPhase();
+  await runChat();
+}
+if(DESKTOP)run();
+
+// ---------- fisheye bulge: a WebGL pass over the finished frame (falls back to the plain canvas) ----------
+const glc=document.getElementById("gl");let GL=null,glT=null;
+const BULGE=0.14;
+const FRAG="#ifdef GL_FRAGMENT_PRECISION_HIGH\nprecision highp float;\n#else\nprecision mediump float;\n#endif\n"+
+ "varying vec2 v;uniform sampler2D t;\n"+
+ "void main(){vec2 p=v*2.-1.;vec2 q=p*(1.+"+BULGE.toFixed(3)+"*dot(p,p))/"+(1+BULGE).toFixed(3)+";vec2 u=q*.5+.5;\n"+
+ "float m=step(0.,u.x)*step(u.x,1.)*step(0.,u.y)*step(u.y,1.);gl_FragColor=vec4(texture2D(t,u).rgb*m,1.);}";
+function initGL(){
+  try{
+    const g=glc.getContext("webgl",{alpha:false,antialias:false});if(!g)throw 0;
+    const sh=(t,src)=>{const o=g.createShader(t);g.shaderSource(o,src);g.compileShader(o);if(!g.getShaderParameter(o,g.COMPILE_STATUS))throw 0;return o};
+    const pr=g.createProgram();
+    g.attachShader(pr,sh(g.VERTEX_SHADER,"attribute vec2 a;varying vec2 v;void main(){v=a*.5+.5;gl_Position=vec4(a,0.,1.);}"));
+    g.attachShader(pr,sh(g.FRAGMENT_SHADER,FRAG));
+    g.linkProgram(pr);if(!g.getProgramParameter(pr,g.LINK_STATUS))throw 0;
+    g.useProgram(pr);
+    g.bindBuffer(g.ARRAY_BUFFER,g.createBuffer());
+    g.bufferData(g.ARRAY_BUFFER,new Float32Array([-1,-1,1,-1,-1,1,1,1]),g.STATIC_DRAW);
+    const loc=g.getAttribLocation(pr,"a");g.enableVertexAttribArray(loc);g.vertexAttribPointer(loc,2,g.FLOAT,false,0,0);
+    glT=g.createTexture();g.bindTexture(g.TEXTURE_2D,glT);
+    g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MIN_FILTER,g.LINEAR);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_MAG_FILTER,g.LINEAR);
+    g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_S,g.CLAMP_TO_EDGE);g.texParameteri(g.TEXTURE_2D,g.TEXTURE_WRAP_T,g.CLAMP_TO_EDGE);
+    g.pixelStorei(g.UNPACK_FLIP_Y_WEBGL,true);
+    glc.addEventListener("webglcontextlost",()=>{GL=null;glc.style.display="none";cv.style.display="block"});
+    GL=g;cv.style.display="none";
+  }catch(e){GL=null;glc.style.display="none";cv.style.display="block"}
+}
+function glDraw(){
+  if(!GL)return;
+  if(glc.width!==W||glc.height!==H){glc.width=W;glc.height=H;GL.viewport(0,0,W,H)}
+  GL.bindTexture(GL.TEXTURE_2D,glT);
+  GL.texImage2D(GL.TEXTURE_2D,0,GL.RGBA,GL.RGBA,GL.UNSIGNED_BYTE,cv);
+  GL.drawArrays(GL.TRIANGLE_STRIP,0,4);
+}
+if(DESKTOP)initGL();
+else{document.getElementById("nd").style.display="flex";cv.style.display="none";glc.style.display="none"}
+
+let last=performance.now();
+function frame(t){
+  requestAnimationFrame(frame);
+  if(t-last<32)return; // ~30fps cap
+  const dt=Math.min(.06,(t-last)/1000);last=t;
+  const sp=spd(),sdt=dt*sp,pz=sp===0;
+  if(mode==0)drawM0(sdt,dt,pz);else if(mode==3)drawM3(sdt,dt,pz);else drawSeg(sdt,dt,pz);
+  // wide bloom: three cascaded downscale passes, added back softly
+  s1.getContext("2d").drawImage(cv,0,0,s1.width,s1.height);
+  s2.getContext("2d").drawImage(s1,0,0,s2.width,s2.height);
+  s3.getContext("2d").drawImage(s2,0,0,s3.width,s3.height);
+  x.globalCompositeOperation="lighter";
+  x.globalAlpha=.45;x.drawImage(s1,0,0,W,H);
+  x.globalAlpha=.6;x.drawImage(s2,0,0,W,H);
+  x.globalAlpha=.7;x.drawImage(s3,0,0,W,H);
+  x.globalAlpha=1;x.globalCompositeOperation="source-over";
+  x.drawImage(ov,0,0);
+  if(fade<1){fade=Math.min(1,fade+dt*4);x.fillStyle="rgba(0,0,0,"+(1-fade)+")";x.fillRect(0,0,W,H)}
+  glDraw();
+}
+if(DESKTOP)requestAnimationFrame(frame);
+</script></body></html>
